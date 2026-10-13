@@ -29,6 +29,7 @@ REASON_ENDPOINT = REASONER_ENDPOINT
 REASON_NONE = "none"
 EMIT_INDENT = 2
 FIELD_ERROR_KEYS = frozenset({"field", "reason"})
+CHECK_KEYS = frozenset({"code", "ok", "detail", "required"})
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_INVALID = 2
@@ -613,6 +614,10 @@ def _emit(payload: object, as_json: bool, stream=None) -> None:
 def _line(item: dict[str, object]) -> str:
     if frozenset(item) == FIELD_ERROR_KEYS:
         return f"{item['field']}: {item['reason']}"
+    if frozenset(item) == CHECK_KEYS:
+        verdict = "ok" if item["ok"] else "FAIL"
+        optional = "" if item["required"] else " (optional)"
+        return f"[{verdict}] {item['code']}{optional} — {item['detail']}"
     name = item.get("name", "")
     abstract = item.get("abstract", "")
     path = item.get("path", "")

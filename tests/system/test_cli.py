@@ -498,3 +498,22 @@ def test_sleep_can_be_handed_a_reasoner_whose_verdicts_reach_the_store(cli, monk
     report = cli("sleep", "--reason", "host")
     assert [decision["proposal"] for decision in report["decisions"]] == [proposal["id"]]
     assert proposal["id"] not in {open_one["id"] for open_one in cli("proposals")["proposals"]}
+
+
+def test_doctor_text_output_names_every_check_it_reports(cli, capsys, tmp_path):
+    argv = (
+        "doctor",
+        "--host",
+        "claude-code",
+        "--settings",
+        str(tmp_path / "settings.json"),
+        "--no-live",
+    )
+    main(["--store", str(cli.root), "--json", *argv])
+    checks = json.loads(capsys.readouterr().out)["checks"]
+    main(["--store", str(cli.root), *argv])
+    text = capsys.readouterr().out
+    assert checks
+    for check in checks:
+        assert check["code"] in text
+        assert check["detail"] in text
