@@ -430,9 +430,9 @@ class Store:
                     "create_group": True,
                 })
                 snapshots.update(changed)
-                merged.provenance = list(dict.fromkeys(
-                    pointer for source in active for pointer in source.provenance
-                ))
+                merged.provenance = list(
+                    dict.fromkeys(pointer for source in active for pointer in source.provenance)
+                )
                 assert merged.path is not None
                 payload = merged.to_text().encode("utf-8")
                 self._replace_file(merged.path, payload)
@@ -469,6 +469,34 @@ class Store:
         with store_lock(self.layout):
             return self._write_locked(record)
 
+    def write_many(self, records: list[MemoryRecord]) -> BatchResult:
+        """Many rewrites, one lock and one projection: the same boundary as record_many."""
+        written: list[MemoryRecord] = []
+        rejected: list[Rejected] = []
+        payloads: list[bytes] = []
+        snapshots: dict[pathlib.Path, bytes | None] = {}
+        if not records:
+            return BatchResult(written=written, rejected=rejected)
+        with store_lock(self.layout):
+            try:
+                for index, record in enumerate(records):
+                    try:
+                        path, previous, payload = self._persist(record)
+                    except ValidationError as error:
+                        rejected.append(Rejected(index=index, errors=list(error.errors)))
+                        continue
+                    snapshots.setdefault(path, previous)
+                    written.append(record)
+                    payloads.append(payload)
+                self._project()
+            except Exception:
+                self._restore_files(snapshots)
+                self._project()
+                raise
+        for record, payload in zip(written, payloads, strict=True):
+            record.source_hash = hashlib.sha256(payload).hexdigest()
+        return BatchResult(written=written, rejected=rejected)
+
     def _write_locked(
         self,
         record: MemoryRecord,
@@ -476,29 +504,37 @@ class Store:
         replace_links: bool = False,
         provenance: list[str] | None = None,
     ) -> MemoryRecord:
+        path, previous, payload = self._persist(
+            record, replace_links=replace_links, provenance=provenance
+        )
+        try:
+            self._project()
+        except Exception:
+            self._restore_files({path: previous})
+            self._project()
+            raise
+        record.source_hash = hashlib.sha256(payload).hexdigest()
+        return record
+
+    def _persist(
+        self,
+        record: MemoryRecord,
+        *,
+        replace_links: bool = False,
+        provenance: list[str] | None = None,
+    ) -> tuple[pathlib.Path, bytes | None, bytes]:
         self._validate_write(record, replace_links=replace_links)
         assert record.path is not None
         previous = record.path.read_bytes() if record.path.exists() else None
         if previous is not None and (
-            record.source_hash is None
-            or hashlib.sha256(previous).hexdigest() != record.source_hash
+            record.source_hash is None or hashlib.sha256(previous).hexdigest() != record.source_hash
         ):
             raise ValidationError([FieldError("updated", "memory changed since it was read")])
         for excerpt in provenance or []:
             record.provenance.append(self._store_provenance(record.name, excerpt))
         payload = record.to_text().encode("utf-8")
         self._replace_file(record.path, payload)
-        try:
-            self._project()
-        except Exception:
-            if previous is None:
-                record.path.unlink(missing_ok=True)
-            else:
-                self._replace_file(record.path, previous)
-            self._project()
-            raise
-        record.source_hash = hashlib.sha256(payload).hexdigest()
-        return record
+        return record.path, previous, payload
 
     def _replace_file(self, path: pathlib.Path, payload: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
