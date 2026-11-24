@@ -22,7 +22,8 @@ SCHEMA = (
         path TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         content_hash TEXT NOT NULL,
-        indexed_at TEXT NOT NULL
+        indexed_at TEXT NOT NULL,
+        signature TEXT
     )
     """,
     """
@@ -107,6 +108,9 @@ class Database:
             connection.execute("DROP TABLE IF EXISTS raw_chunks")
             for statement in SCHEMA:
                 connection.execute(statement)
+            files = connection.execute("PRAGMA table_info(files)").fetchall()
+            if not any(column["name"] == "signature" for column in files):
+                connection.execute("ALTER TABLE files ADD COLUMN signature TEXT")
             yield connection
             connection.commit()
         except Exception:

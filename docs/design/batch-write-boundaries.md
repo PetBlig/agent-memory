@@ -15,4 +15,6 @@ retain their existing error category and also abort the batch.
 Archived evidence remains append-only, including evidence appended by an aborted
 batch. Recovery covers canonical files and their projections; interrupted processes
 and persistent storage failures require a separate durable recovery design. Projection
-continues to discover changes made outside Store.
+continues to discover changes made outside Store: it compares each file's signature with
+the one last indexed and reads only files that differ, so its cost follows the changes,
+not the store size.

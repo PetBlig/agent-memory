@@ -6,6 +6,7 @@ decides update versus replacement (ADR-009), and reprojects. Nothing here delete
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
 import os
@@ -24,6 +25,7 @@ from .embeddings import Embedder, create_embedder
 from .errors import FieldError, NotFoundError, ValidationError
 from .indexer import Indexer, IndexReport
 from .locking import store_lock
+from .manifest import file_signature
 from .paths import StoreLayout
 from .record import MemoryRecord
 from .schema import MODE_ADD_ONLY, MemorySchema, SchemaRegistry
@@ -110,6 +112,7 @@ class Store:
         self.embedder = embedder
         self._indexer = Indexer(self.layout, self.clock, embedder)
         self._database = Database(self.layout)
+        self._parsed: dict[pathlib.Path, tuple[str, MemoryRecord]] = {}
 
     def init(self) -> StoreLayout:
         self.layout.ensure()
@@ -629,22 +632,41 @@ class Store:
     def rebuild_index(self) -> IndexReport:
         with store_lock(self.layout):
             report = self._indexer.rebuild()
-            memory_md.write(self.layout, self.records())
+            self._write_memory_md()
             return report
 
     def _project(self) -> IndexReport:
         report = self._indexer.sync()
-        memory_md.write(self.layout, self.records())
+        self._write_memory_md()
         return report
+
+    def _write_memory_md(self) -> None:
+        with self._database.connect() as connection:
+            rows = SearchIndex(connection).rows(include_invalid=False)
+        memory_md.write(self.layout, [memory_md.Entry.from_row(row) for row in rows])
 
     def _log_access(self, entries: list[AccessEntry]) -> None:
         with self._database.connect() as connection:
             AccessLog(connection).append(entries)
 
     def _at(self, path: pathlib.Path | None) -> MemoryRecord | None:
-        if path is None or not path.exists() or self.layout.type_of(path) is None:
+        if path is None or self.layout.type_of(path) is None:
             return None
-        return MemoryRecord.from_text(path.read_text(encoding="utf-8"), path)
+        signature = file_signature(path)
+        if signature is None:
+            self._parsed.pop(path, None)
+            return None
+        cached = self._parsed.get(path)
+        if cached is None or cached[0] != signature:
+            cached = (signature, MemoryRecord.from_text(path.read_text(encoding="utf-8"), path))
+            self._parsed[path] = cached
+        record = cached[1]
+        return dataclasses.replace(
+            record,
+            links=list(record.links),
+            provenance=list(record.provenance),
+            fields=copy.deepcopy(record.fields),
+        )
 
     def _scan_for(self, name: str) -> pathlib.Path | None:
         for path in self.layout.truth_files():
