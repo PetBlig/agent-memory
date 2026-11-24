@@ -1,4 +1,5 @@
-"""Truth → projection. Incremental by content hash; a full rebuild is the same code path."""
+"""Truth → projection. Incremental by file signature and content hash; a full rebuild is the
+same code path."""
 
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ from .clock import Clock
 from .database import Database
 from .embeddings import Embedder
 from .errors import ValidationError
-from .manifest import Manifest, content_hash
+from .manifest import Manifest, content_hash, file_signature
 from .paths import StoreLayout
 from .record import MemoryRecord
 from .schema import SchemaRegistry
@@ -42,10 +43,10 @@ class Indexer:
         self._embedder = embedder
 
     def sync(self) -> IndexReport:
-        present = self._present_hashes()
         with self._database.connect() as connection:
             manifest = Manifest(connection, self._config.index.hash_prefix_length)
             index = SearchIndex(connection)
+            present, read = self._present_hashes(manifest.signed())
             delta = manifest.diff(present)
             unreadable: list[str] = []
             reindexed: list[str] = []
@@ -58,9 +59,15 @@ class Indexer:
                 index.remove_path(relative)
                 index.upsert(record, chunking.chunks(record, self._config), relative)
                 manifest.record(
-                    relative, record.name, present[relative], self._clock.now().isoformat()
+                    relative,
+                    record.name,
+                    present[relative],
+                    self._clock.now().isoformat(),
+                    read[relative],
                 )
                 reindexed.append(relative)
+            for relative in read.keys() - set(delta.touched):
+                manifest.sign(relative, read[relative])
             for relative in delta.removed:
                 index.remove_path(relative)
                 manifest.forget(relative)
@@ -92,14 +99,23 @@ class Indexer:
         self._database.drop()
         return self.sync()
 
-    def _present_hashes(self) -> dict[str, str]:
+    def _present_hashes(
+        self, signed: dict[str, tuple[str, str]]
+    ) -> tuple[dict[str, str], dict[str, str | None]]:
         present: dict[str, str] = {}
+        read: dict[str, str | None] = {}
         for path in self._layout.truth_files():
             relative = str(path.relative_to(self._layout.root))
+            signature = file_signature(path)
+            known = signed.get(relative)
+            if signature is not None and known is not None and known[0] == signature:
+                present[relative] = known[1]
+                continue
             present[relative] = content_hash(
                 path.read_text(encoding="utf-8"), self._config.index.hash_prefix_length
             )
-        return present
+            read[relative] = signature
+        return present, read
 
     def _load(self, path: pathlib.Path) -> MemoryRecord | None:
         type_name = self._layout.type_of(path)

@@ -19,8 +19,6 @@
 - Decide whether direct link/unlink delta commands, relation audit history and per-operation
   bounds are needed; current correct replaces the complete list.
 - Review recovery of interrupted multi-file operations outside Git-backed stores.
-- Sleep still reads every truth file several times per run (proposals, caps, group passes);
-  on a slow filesystem a large store pays that cost per pass.
 
 ## Write follow-ups
 
