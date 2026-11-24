@@ -352,7 +352,7 @@ class Manage:
         return hits, reads, last_access
 
     def _normalise_dates(self, records: list[MemoryRecord]) -> list[Action]:
-        actions: list[Action] = []
+        pending: list[tuple[MemoryRecord, Action]] = []
         for record in records:
             wanted = {field: _as_instant(getattr(record, field)) for field in DATE_FIELDS}
             changed = {
@@ -364,14 +364,15 @@ class Manage:
                 continue
             for field, value in changed.items():
                 setattr(record, field, value)
-            self._rewrite(record)
-            actions.append(Action(ACTION_DATE_NORMALISED, record.name, ", ".join(sorted(changed))))
-        return actions
+            pending.append(
+                (record, Action(ACTION_DATE_NORMALISED, record.name, ", ".join(sorted(changed))))
+            )
+        return self._rewrite_all(pending)
 
     def _settle_weights(
         self, records: list[MemoryRecord], reads: dict[str, int], last_access: dict[str, str]
     ) -> list[Action]:
-        actions: list[Action] = []
+        pending: list[tuple[MemoryRecord, Action]] = []
         now = self._clock.now()
         for record in records:
             before = record.weight
@@ -384,11 +385,10 @@ class Manage:
             if after == before:
                 continue
             record.weight = after
-            self._rewrite(record)
-            actions.append(
-                Action(ACTION_WEIGHT_SETTLED, record.name, f"{before:.2f} -> {after:.2f}")
+            pending.append(
+                (record, Action(ACTION_WEIGHT_SETTLED, record.name, f"{before:.2f} -> {after:.2f}"))
             )
-        return actions
+        return self._rewrite_all(pending)
 
     def _add_cooccurrence_links(self, records: list[MemoryRecord]) -> list[Action]:
         with self._database.connect() as connection:
@@ -406,7 +406,7 @@ class Manage:
                         together[(left, right)] = together.get((left, right), 0) + 1
 
         known = {record.name: record for record in records}
-        actions: list[Action] = []
+        pending: list[tuple[MemoryRecord, Action]] = []
         for (left, right), count in sorted(together.items()):
             if count < self._config.manage.link_cooccurrence_min:
                 continue
@@ -415,13 +415,12 @@ class Manage:
                 if record is None or target not in known or target in record.links:
                     continue
                 record.links.append(target)
-                self._rewrite(record)
-                actions.append(Action(ACTION_LINK_ADDED, source, target))
-        return actions
+                pending.append((record, Action(ACTION_LINK_ADDED, source, target)))
+        return self._rewrite_all(pending)
 
     def _merge_exact_duplicates(self, records: list[MemoryRecord]) -> list[Action]:
         seen: dict[str, MemoryRecord] = {}
-        actions: list[Action] = []
+        pending: list[tuple[MemoryRecord, Action]] = []
         for record in sorted(records, key=lambda item: (item.created, item.name)):
             if not record.is_active():
                 continue
@@ -431,9 +430,8 @@ class Manage:
                 seen[key] = record
                 continue
             record_module.invalidate(record, self._clock.timestamp(), original.name)
-            self._rewrite(record)
-            actions.append(Action(ACTION_DUPLICATE_MERGED, record.name, original.name))
-        return actions
+            pending.append((record, Action(ACTION_DUPLICATE_MERGED, record.name, original.name)))
+        return self._rewrite_all(pending)
 
     def _menu_group_fields(self) -> dict[str, str]:
         return {
@@ -459,12 +457,17 @@ class Manage:
                 for group in variants:
                     if group == keeper:
                         continue
-                    for record in self._store.records():
-                        if record.type == type_name and record.fields.get(group_field) == group:
-                            self._move(record, group_field, keeper)
-                            actions.append(
-                                Action(ACTION_GROUP_MERGED, record.name, f"{group} -> {keeper}")
-                            )
+                    moves = [
+                        (
+                            record,
+                            group_field,
+                            keeper,
+                            Action(ACTION_GROUP_MERGED, record.name, f"{group} -> {keeper}"),
+                        )
+                        for record in self._store.records()
+                        if record.type == type_name and record.fields.get(group_field) == group
+                    ]
+                    actions.extend(self._move_all(moves))
                     self._prune_empty_groups()
         return actions
 
@@ -502,10 +505,20 @@ class Manage:
                     if label in self._store.layout.groups_of(known[name].type):
                         continue
                     movable.append((known[name], group_field))
-                for record, group_field in movable:
-                    current = record.fields.get(group_field, "")
-                    self._move(record, group_field, label)
-                    actions.append(Action(ACTION_CLUSTERED, record.name, f"{current} -> {label}"))
+                moves = [
+                    (
+                        record,
+                        group_field,
+                        label,
+                        Action(
+                            ACTION_CLUSTERED,
+                            record.name,
+                            f"{record.fields.get(group_field, '')} -> {label}",
+                        ),
+                    )
+                    for record, group_field in movable
+                ]
+                actions.extend(self._move_all(moves))
                 self._prune_empty_groups()
         return actions
 
@@ -516,20 +529,26 @@ class Manage:
                 if not any(folder.iterdir()):
                     folder.rmdir()
 
-    def _move(self, record: MemoryRecord, group_field: str, group: str) -> MemoryRecord:
-        """A move is a write with one field changed; name, body and evidence travel intact."""
-        return self._store.record(
-            type=record.type,
-            name=record.name,
-            fields={**record.fields, group_field: group},
-            abstract=record.abstract,
-            body=record.body,
-            links=list(record.links),
-            weight=record.weight,
-            valid_from=record.valid_from,
-            author=record.author,
-            create_group=True,
-        )
+    def _move_all(self, moves: list[tuple[MemoryRecord, str, str, Action]]) -> list[Action]:
+        """A move is a write with one field changed; name, body and evidence travel intact.
+        One group's moves are one batch, and a rejected move costs only its own action."""
+        specs: list[dict[str, object]] = [
+            {
+                "type": record.type,
+                "name": record.name,
+                "fields": {**record.fields, group_field: group},
+                "abstract": record.abstract,
+                "body": record.body,
+                "links": list(record.links),
+                "weight": record.weight,
+                "valid_from": record.valid_from,
+                "author": record.author,
+                "create_group": True,
+            }
+            for record, group_field, group, _ in moves
+        ]
+        rejected = {item.index for item in self._store.record_many(specs).rejected}
+        return [action for index, (_, _, _, action) in enumerate(moves) if index not in rejected]
 
     def _group_size(self, type_name: str, group: str) -> int:
         folder = self._store.layout.type_dir(type_name) / group
@@ -634,6 +653,12 @@ class Manage:
 
     def _rewrite(self, record: MemoryRecord) -> None:
         self._store.write(record)
+
+    def _rewrite_all(self, pending: list[tuple[MemoryRecord, Action]]) -> list[Action]:
+        """One rule-only pass, one batch: a rejected memory costs only its own actions."""
+        unique = list({id(record): record for record, _ in pending}.values())
+        written = {id(record) for record in self._store.write_many(unique).written}
+        return [action for record, action in pending if id(record) in written]
 
     def _write_report(self, report: DreamReport) -> str:
         folder = self._store.layout.dream_reports

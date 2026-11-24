@@ -306,3 +306,68 @@ def test_failed_batches_restore_all_canonical_changes(store, monkeypatch, failur
     assert {hit.name for hit in Recall(store).recall("orchid")} == {
         record.name for record in originals
     }
+
+
+def _projection_counter(store, monkeypatch):
+    calls = []
+    original = type(store)._project
+    monkeypatch.setattr(type(store), "_project", lambda self: calls.append(1) or original(self))
+    return calls
+
+
+def test_rewriting_many_memories_projects_once(store, monkeypatch):
+    written = store.record_many(SPECS).written
+    for record in written:
+        record.weight = record.weight / 2
+    calls = _projection_counter(store, monkeypatch)
+    result = store.write_many(written)
+    assert len(calls) == 1
+    assert result.rejected == []
+    assert {record.name: record.weight for record in store.records()} == {
+        record.name: record.weight for record in written
+    }
+
+
+def test_a_rewrite_batch_rejects_only_its_invalid_item(store):
+    written = store.record_many(SPECS).written
+    written[0].abstract = " "
+    written[1].weight = written[1].weight / 2
+    result = store.write_many(written)
+    assert [rejected.index for rejected in result.rejected] == [0]
+    assert {record.name for record in result.written} == {written[1].name, written[2].name}
+    assert store.find(written[0].name).abstract == SPECS[0]["abstract"]
+    assert store.find(written[1].name).weight == written[1].weight
+
+
+def test_a_rewrite_batch_rejects_a_memory_changed_since_it_was_read(store):
+    written = store.record_many(SPECS).written
+    stale = store.find(written[0].name)
+    fresh = store.find(written[0].name)
+    fresh.weight = fresh.weight / 2
+    store.write(fresh)
+    stale.weight = stale.weight * 2
+    result = store.write_many([stale])
+    assert [rejected.index for rejected in result.rejected] == [0]
+    assert store.find(written[0].name).weight == fresh.weight
+
+
+def test_a_failed_rewrite_projection_restores_every_file(store, monkeypatch):
+    written = store.record_many(SPECS).written
+    before = {path: path.read_bytes() for path in store.layout.truth_files()}
+    for record in written:
+        record.weight = record.weight / 2
+    project = store._project
+    failed = False
+
+    def fail_once():
+        nonlocal failed
+        report = project()
+        if not failed:
+            failed = True
+            raise RuntimeError("injected projection failure")
+        return report
+
+    monkeypatch.setattr(store, "_project", fail_once)
+    with pytest.raises(RuntimeError, match="injected projection failure"):
+        store.write_many(written)
+    assert {path: path.read_bytes() for path in store.layout.truth_files()} == before

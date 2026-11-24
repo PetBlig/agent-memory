@@ -593,3 +593,61 @@ def test_a_group_sharing_too_few_tokens_is_not_a_topic(seeded):
         "Kubernetes control plane upgrade note {index}",
     )
     assert ACTION_CLUSTERED not in _kinds(Manage(seeded).sleep())
+
+
+def _projections_for_one_sleep(store, clock, monkeypatch, memories):
+    for index in range(memories):
+        store.record(abstract=f"Untouched decaying note number {index}", type="fact")
+    clock.advance(days=store.config.weight.decay_after_days * 2)
+    calls = []
+    original = type(store)._project
+    monkeypatch.setattr(type(store), "_project", lambda self: calls.append(1) or original(self))
+    report = Manage(store).sleep()
+    settled = sum(action.kind == ACTION_WEIGHT_SETTLED for action in report.actions)
+    return len(calls), settled
+
+
+def test_sleep_projection_cost_does_not_grow_with_rewrites(tmp_path, config, clock, monkeypatch):
+    from agent_memory.core.store import Store
+
+    def fresh(name):
+        store = Store(tmp_path / name, config=config, clock=clock, agent="t")
+        store.init()
+        return store
+
+    small_calls, small_settled = _projections_for_one_sleep(fresh("small"), clock, monkeypatch, 3)
+    large_calls, large_settled = _projections_for_one_sleep(fresh("large"), clock, monkeypatch, 12)
+    assert large_settled > small_settled
+    assert large_calls == small_calls
+
+
+def _projections_for_one_cluster(store, monkeypatch, memories):
+    for index in range(memories):
+        store.record(
+            abstract=f"Deploy pipeline note number {index} about the release rollout",
+            type="reference",
+            name=f"deploy-note-{index}",
+        )
+    calls = []
+    original = type(store)._project
+    monkeypatch.setattr(type(store), "_project", lambda self: calls.append(1) or original(self))
+    report = Manage(store).sleep()
+    moved = sum(action.kind == ACTION_CLUSTERED for action in report.actions)
+    return len(calls), moved
+
+
+def test_cluster_projection_cost_does_not_grow_with_moves(tmp_path, config, clock, monkeypatch):
+    from agent_memory.core.store import Store
+
+    def fresh(name):
+        store = Store(tmp_path / name, config=config, clock=clock, agent="t")
+        store.init()
+        return store
+
+    minimum = config.manage.cluster_min_files
+    small_calls, small_moved = _projections_for_one_cluster(fresh("small"), monkeypatch, minimum)
+    large_calls, large_moved = _projections_for_one_cluster(
+        fresh("large"), monkeypatch, minimum * 3
+    )
+    assert large_moved > small_moved
+    assert large_calls == small_calls

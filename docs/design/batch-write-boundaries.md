@@ -2,7 +2,9 @@
 
 Store handles a batch under one writer lock. Invalid input rejects its own item with
 an index and field error; accepted siblings share one projection. Single-record
-writes use the same validation and persistence boundary.
+writes use the same validation and persistence boundary. Rewrites of existing memories
+cross the same boundary: each rule-only Manage pass is one batch, so a sleep's projection
+cost stays flat as the store grows.
 
 An operational failure during writing or projection aborts the batch. Store restores
 touched canonical memory files to their pre-batch contents and projects the restored

@@ -19,6 +19,15 @@
 - Decide whether direct link/unlink delta commands, relation audit history and per-operation
   bounds are needed; current correct replaces the complete list.
 - Review recovery of interrupted multi-file operations outside Git-backed stores.
+- Sleep still reads every truth file several times per run (proposals, caps, group passes);
+  on a slow filesystem a large store pays that cost per pass.
+
+## Write follow-ups
+
+- Pending leftovers drain only on their own session's next distill, so a session that has
+  ended strands them; decide how a later boundary or Manage retries or retires them.
+- Boundary hooks launch a new distill while the previous one for the same session still
+  runs; on a slow store they pile up and hold the writer lock long enough to time out a sleep.
 
 ## Executor follow-ups
 
