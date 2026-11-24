@@ -26,8 +26,6 @@
 
 - Pending leftovers drain only on their own session's next distill, so a session that has
   ended strands them; decide how a later boundary or Manage retries or retires them.
-- Boundary hooks launch a new distill while the previous one for the same session still
-  runs; on a slow store they pile up and hold the writer lock long enough to time out a sleep.
 
 ## Executor follow-ups
 
