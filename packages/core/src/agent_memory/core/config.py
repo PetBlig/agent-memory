@@ -123,6 +123,8 @@ class WriteConfig:
     chars_per_token: int = 4
     idle_seconds: float = 900.0
     distill_on_boundary: bool = True
+    claim_dirname: str = "distilling"
+    distill_catch_up_rounds: int = 3
     slot_table: bool = True
     event_lane: bool = True
     max_rounds: int = 3

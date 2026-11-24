@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from agent_memory.core import context as context_module
 from agent_memory.core import distill as distill_module
 from agent_memory.core import migrate as migrate_module
-from agent_memory.core import pending, portability, prompts, reasoning, sessions, triggers
+from agent_memory.core import pending, portability, prompts, reasoning, sessions
 from agent_memory.core.config import REASONER_ENDPOINT, REASONER_HOST
 from agent_memory.core.errors import FieldError, MemoryStoreError, ValidationError
 from agent_memory.core.manage import Manage
@@ -377,29 +377,14 @@ def _distill(store: Store, args: argparse.Namespace) -> dict[str, object]:
     named = list(args.session or [])
     candidates = named or sorted(set(watermark.sessions()) | set(_archived_sessions(store)))
     ask = _reasoner(store, args) or distiller.distiller(store.config.executor)
-    now = store.clock.now().isoformat()
-    reports = []
+    reports: list[dict[str, object]] = []
     queue = pending.Pending(store.layout)
     for session in sorted(set(candidates) | set(queue.redistill_sessions())):
-        requested = tuple(queue.redistill(session))
-        backlog = triggers.backlog(store.layout, session, watermark, requested)
-        reason = (
-            triggers.REASON_FORCED
-            if args.force
-            else triggers.reason_for(
-                store.config.write,
-                watermark.read(session),
-                backlog,
-                now,
-                session in named,
-                bool(requested),
+        reports.extend(
+            distill_module.distill_session(
+                store, session, ask, boundary=session in named, forced=bool(args.force)
             )
         )
-        if reason is None:
-            continue
-        report = distill_module.distill(store, session, backlog, ask)
-        queue.clear_redistill(session)
-        reports.append({"reason": reason, **report.as_dict()})
     return {"distilled": reports}
 
 

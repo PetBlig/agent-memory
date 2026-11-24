@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 
-from . import agentic, batching, pending, prompts, reconcile, render
+from . import agentic, batching, locking, pending, prompts, reconcile, render, triggers
 from .errors import FieldError
 from .sessions import Message, Pointer, render_pointer
 from .store import BatchResult, Rejected, Store
@@ -49,6 +49,55 @@ class DistillReport:
             "batches": [batch.as_dict() for batch in self.batches],
             "consumed": self.consumed,
         }
+
+
+SKIPPED_CLAIMED = "another distillation of this session is running"
+
+
+def distill_session(
+    store: Store, session: str, ask: Ask, *, boundary: bool, forced: bool
+) -> list[dict[str, object]]:
+    """Distill one session under its claim, then catch up on material archived meanwhile.
+
+    A boundary that found the session claimed only archived its material; this run is the
+    one that distills it, so a skipped boundary costs latency, never knowledge."""
+    with locking.session_claim(store.layout, session) as claimed:
+        if not claimed:
+            return [{"session": session, "skipped": SKIPPED_CLAIMED}]
+        reports: list[dict[str, object]] = []
+        for _ in range(1 + store.config.write.distill_catch_up_rounds):
+            report = _distill_due(store, session, ask, boundary=boundary, forced=forced)
+            if report is None:
+                break
+            reports.append(report)
+            forced = False
+        return reports
+
+
+def _distill_due(
+    store: Store, session: str, ask: Ask, *, boundary: bool, forced: bool
+) -> dict[str, object] | None:
+    watermark = Watermark(store.layout, store.clock)
+    queue = pending.Pending(store.layout)
+    requested = tuple(queue.redistill(session))
+    backlog = triggers.backlog(store.layout, session, watermark, requested)
+    reason = (
+        triggers.REASON_FORCED
+        if forced
+        else triggers.reason_for(
+            store.config.write,
+            watermark.read(session),
+            backlog,
+            store.clock.now().isoformat(),
+            boundary,
+            bool(requested),
+        )
+    )
+    if reason is None:
+        return None
+    report = distill(store, session, backlog, ask)
+    queue.clear_redistill(session)
+    return {"reason": reason, **report.as_dict()}
 
 
 def distill(store: Store, session: str, messages: list[Message], ask: Ask) -> DistillReport:

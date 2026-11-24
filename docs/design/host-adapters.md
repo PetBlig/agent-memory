@@ -5,6 +5,11 @@ eviction, and pause moments. Executor dialects translate a prompt and tool postu
 headless host invocation and normalize only its final answer. Capture, archive, distillation,
 Memory, Recall, and Manage stay host-neutral.
 
+A distillation claims its session for as long as it runs. A boundary that finds its session
+claimed only archives the new material, and the claimed distillation catches up on it, within
+a configured number of rounds, before it releases the claim. One session's backlog is therefore
+never distilled twice at once.
+
 `muse-code` is the canonical Muse Code identity and `muse` is only a setup alias and binary
 name. Muse lifecycle events use the existing moments, and only root-session material enters the
 archive. Muse's native memory remains independent and is never copied, synchronized, or treated
